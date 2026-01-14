@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>语言学立项标题库 本地检索与选题评判</title>
+  <link rel="stylesheet" href="assets/styles.css" />
+  <!-- Online-only libs (per requirement: must be online) -->
+  <script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-title">语言学立项标题库 本地检索与选题评判</div>
+      <div class="brand-subtitle">本地检索 + LLM评审建议 + 可视化与导出（联网版）V1.0</div>
+      <div class="brand-subtitle">Developed by Merlin Yang</div>
+    </div>
+    <div class="header-actions">
+      <button id="btnClearStorage" class="btn btn-secondary" title="清除本地保存的API Key等信息">清除本地设置</button>
+      <button id="btnExportAll" class="btn btn-secondary" title="导出当前页面的图文报告">导出图文报告</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <nav class="tabs" role="tablist" aria-label="功能导航">
+      <button class="tab is-active" data-tab="load" role="tab" aria-selected="true">0. 数据加载</button>
+      <button class="tab" data-tab="search" role="tab" aria-selected="false">1. 检索</button>
+      <button class="tab" data-tab="eval" role="tab" aria-selected="false">2. 选题评判</button>
+      <button class="tab" data-tab="graph" role="tab" aria-selected="false">3. 知识图谱</button>
+      <button class="tab" data-tab="graph-view" role="tab" aria-selected="false">4. 图谱视图</button>
+    </nav>
+
+    <section class="panel tab-panel is-active" data-tab="load">
+      <h2>0. 数据加载</h2>
+      <p class="hint">
+        请从本地选择你已有的 JSONL 文件：<code>project.jsonl</code>（项目数据库），<code>trends.jsonl</code>（趋势数据库）与
+        <code>vectors.jsonl</code>（向量数据库）。
+        由于浏览器的安全限制，本工具采用“手动选择文件”的方式读取数据，不需要启动本地服务器。
+      </p>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">项目数据库（必选）</div>
+          <input id="fileProjects" type="file" accept=".jsonl,.txt" />
+          <div id="projectsStatus" class="status">未加载</div>
+        </div>
+        <div class="card">
+          <div class="card-title">趋势数据库（建议）</div>
+          <input id="fileBuckets" type="file" accept=".jsonl,.txt" />
+          <div id="bucketsStatus" class="status">未加载（可选）</div>
+        </div>
+      </div>
+
+      <div class="row">
+        <button id="btnBuildIndex" class="btn btn-primary" disabled>构建检索索引</button>
+        <span id="indexStatus" class="status">等待加载数据</span>
+      </div>
+    </section>
+
+    <section class="panel tab-panel" data-tab="search">
+      <h2>1. 检索</h2>
+      <div class="grid-3">
+        <div class="field">
+          <label>检索词</label>
+          <input id="q" type="text" placeholder="输入关键词，如：新媒体 语料 言语行为 标记" />
+        </div>
+        <div class="field">
+          <label>模式</label>
+          <div class="radio-row">
+            <label class="radio"><input type="radio" name="mode" value="fuzzy" checked /> 模糊模式（Fuse）</label>
+            <label class="radio"><input type="radio" name="mode" value="exact" /> 精确模式（子串/全包含）</label>
+          </div>
+        </div>
+        <div class="field">
+          <label>返回条数</label>
+          <select id="limit">
+            <option value="20">20</option>
+            <option value="30" selected>30</option>
+            <option value="50">50</option>
+            <option value="80">80</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="grid-3">
+        <div class="field">
+          <label>年份过滤（可选）</label>
+          <div class="row">
+            <input id="yearFrom" type="number" placeholder="起始年份" />
+            <input id="yearTo" type="number" placeholder="结束年份" />
+          </div>
+        </div>
+        <div class="field">
+          <label>模板 pattern（可选）</label>
+          <select id="patternFilter">
+            <option value="">不限制</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>操作</label>
+          <div class="row">
+            <button id="btnSearch" class="btn btn-primary" disabled>检索</button>
+            <button id="btnResetFilters" class="btn btn-secondary">重置</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="split">
+        <div class="left">
+          <h3>检索结果</h3>
+          <div id="resultsMeta" class="hint">尚未检索</div>
+          <div id="results" class="results"></div>
+        </div>
+        <div class="right">
+          <h3>可视化</h3>
+          <div class="chart-card">
+            <div class="chart-title">年份分布</div>
+            <canvas id="chartYears" height="180"></canvas>
+          </div>
+          <div class="chart-card">
+            <div class="chart-title">Pattern 分布</div>
+            <canvas id="chartPatterns" height="180"></canvas>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel tab-panel" data-tab="eval">
+      <h2>2. 拟申报选题评判（联网调用大模型）</h2>
+      <p class="hint">
+        将基于“检索证据 + 趋势桶”生成专家评议式意见，并给出 3-5 个选题备选。
+        为保证可控性，回答会强制引用本地检索到的证据标题。
+      </p>
+
+      <div class="grid-2">
+        <div class="field">
+          <label>拟申报题目</label>
+          <input id="proposalTitle" type="text" placeholder="输入你的拟申报题目" />
+        </div>
+        <div class="field">
+          <label>评判时使用的检索词（可留空，默认使用拟题）</label>
+          <input id="proposalQuery" type="text" placeholder="例如：新媒体 语料 互动 话语标记" />
+        </div>
+      </div>
+
+      <div class="grid-3">
+        <div class="field">
+          <label>服务商</label>
+          <select id="provider">
+            <option value="openrouter" selected>OpenRouter</option>
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Claude (Anthropic)</option>
+            <option value="deepseek">DeepSeek</option>
+          </select>
+        </div>
+        <div class="field" id="modelField">
+          <label>模型（OpenRouter）</label>
+          <select id="orModel">
+            <option value="openai/gpt-5-mini">openai/gpt-5-mini</option>
+            <option value="anthropic/claude-sonnet-4.5">anthropic/claude-sonnet-4.5</option>
+            <option value="deepseek/deepseek-v3.2">deepseek/deepseek-v3.2</option>
+            <option value="google/gemini-3-flash-preview">google/gemini-3-flash-preview</option>
+            <option value="__custom__">手动输入（可扩展）</option>
+          </select>
+          <input id="orModelCustom" type="text" placeholder="例如：openai/gpt-5" style="display:none;margin-top:8px" />
+        </div>
+        <div class="field">
+          <label>API Key（仅保存在本地浏览器）</label>
+          <input id="apiKey" type="password" placeholder="粘贴你的 API Key" />
+        </div>
+      </div>
+
+      <div class="grid-3">
+        <div class="field">
+          <label>温度</label>
+          <input id="temperature" type="number" min="0" max="1" step="0.05" value="0.2" />
+        </div>
+        <div class="field">
+          <label>证据条数 topK（用于评判）</label>
+          <select id="ragK">
+            <option value="15">15</option>
+            <option value="20">20</option>
+            <option value="30" selected>30</option>
+            <option value="50">50</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>趋势桶 topM（用于趋势提纲）</label>
+          <select id="ragM">
+            <option value="5">5</option>
+            <option value="8" selected>8</option>
+            <option value="10">10</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <button id="btnEvaluate" class="btn btn-primary" disabled>生成评审意见与备选题目</button>
+        <span id="evalStatus" class="status">等待输入</span>
+      </div>
+
+      <div class="output">
+        <h3>模型输出</h3>
+        <div id="llmOutput" class="llm"></div>
+      </div>
+    </section>
+
+    <section class="panel tab-panel" data-tab="eval">
+      <h2>下载与保存</h2>
+      <div class="grid-3">
+        <button id="btnDownloadJSON" class="btn btn-secondary">下载结果JSON</button>
+        <button id="btnDownloadMD" class="btn btn-secondary">下载结果Markdown</button>
+        <button id="btnDownloadHTML" class="btn btn-secondary">下载图文报告HTML</button>
+      </div>
+      <p class="hint">提示：图文报告HTML会将当前页面的文字与图表截图嵌入到一个可离线阅读的HTML文件中。</p>
+    </section>
+
+    <section class="panel tab-panel" data-tab="graph">
+      <h2>3. 基于检索词的知识图谱（纯前端）</h2>
+      <p class="hint">
+        支持两种数据加载路径：直接读取 <code>vectors.jsonl</code>，或加载预处理后的
+        <code>metadata.json</code> + <code>embeddings.gz</code>（推荐，体积更小）。
+        在本地完成检索、相似度计算与图谱生成，无需外部向量数据库。
+      </p>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">预处理资源（推荐）</div>
+          <div class="field">
+            <label>metadata.json</label>
+            <input id="fileMetadata" type="file" accept=".json" />
+          </div>
+          <div class="field">
+            <label>embeddings.gz</label>
+            <input id="fileEmbeddings" type="file" accept=".gz,.bin" />
+          </div>
+          <div class="field">
+            <label>graph.json（预计算图谱，可选）</label>
+            <input id="fileGraph" type="file" accept=".json" />
+          </div>
+          <div class="field">
+            <label>inverted-index.json（可选）</label>
+            <input id="fileInverted" type="file" accept=".json" />
+          </div>
+          <div id="vectorAssetStatus" class="status">未加载</div>
+        </div>
+        <div class="card">
+          <div class="card-title">直接加载 vectors.jsonl（兼容）</div>
+          <div class="field">
+            <label>vectors.jsonl</label>
+            <input id="fileVectors" type="file" accept=".jsonl,.txt" />
+          </div>
+          <div id="vectorsStatus" class="status">未加载（可选）</div>
+        </div>
+      </div>
+
+      <div class="grid-3">
+        <div class="field">
+          <label>检索词</label>
+          <input id="graphQuery" type="text" placeholder="输入关键词，如：语料 互动 话语标记" />
+        </div>
+        <div class="field">
+          <label>检索模式</label>
+          <select id="graphMode">
+            <option value="tfidf" selected>本地 TF-IDF</option>
+            <option value="hybrid">TF-IDF + OpenRouter Embedding 精排</option>
+            <option value="embedding">仅 Embedding（需联网）</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>候选条数 TopK</label>
+          <select id="graphTopK">
+            <option value="30">30</option>
+            <option value="50" selected>50</option>
+            <option value="80">80</option>
+            <option value="120">120</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="grid-3">
+        <div class="field">
+          <label>题目相似度阈值（共享关键词）</label>
+          <input id="graphThreshold" type="number" min="0.05" max="0.6" step="0.05" value="0.2" />
+        </div>
+        <div class="field">
+          <label>节点上限</label>
+          <select id="graphNodeLimit">
+            <option value="20">20</option>
+            <option value="30">30</option>
+            <option value="40" selected>40</option>
+            <option value="50">50</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>边上限</label>
+          <select id="graphEdgeLimit">
+            <option value="80">80</option>
+            <option value="120" selected>120</option>
+            <option value="180">180</option>
+            <option value="240">240</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <button id="btnBuildGraph" class="btn btn-primary" disabled>生成知识图谱</button>
+        <button id="btnAnalyzeGraph" class="btn btn-secondary" disabled>AI 深度分析</button>
+      </div>
+
+      <div class="row">
+        <span id="graphStatus" class="status">等待加载向量数据库</span>
+      </div>
+
+      <div class="panel inner-panel">
+        <h3>快速预览（预计算图谱）</h3>
+        <div id="graphOverview" class="hint">尚未加载 graph.json</div>
+        <div class="grid-2">
+          <div class="chart-card">
+            <div class="chart-title">年份趋势</div>
+            <canvas id="graphYearTrend" height="180"></canvas>
+          </div>
+          <div class="chart-card">
+            <div class="chart-title">主题聚类（Top）</div>
+            <div id="graphClusters" class="cluster-list"></div>
+          </div>
+        </div>
+        <div class="tag-cloud" id="graphCooccurrence"></div>
+      </div>
+
+      <div class="split">
+        <div class="left">
+          <h3>图谱摘要</h3>
+          <div id="graphMeta" class="hint">尚未生成</div>
+          <div id="graphTop" class="results"></div>
+          <div class="output">
+            <h3>AI 推理图谱（JSON）</h3>
+            <div id="graphAnalysis" class="llm"></div>
+          </div>
+        </div>
+        <div class="right">
+          <h3>分析图表</h3>
+          <div class="chart-card">
+            <div class="chart-title">研究热度时间演化</div>
+            <canvas id="graphTimeline" height="180"></canvas>
+          </div>
+          <div class="chart-card">
+            <div class="chart-title">潜在研究空白</div>
+            <canvas id="graphGaps" height="180"></canvas>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel tab-panel" data-tab="graph-view">
+      <h2>4. 知识图谱视图（可拖动）</h2>
+      <p class="hint">可拖动节点调整布局，点击节点可放大对应题目文字。</p>
+      <div class="chart-card graph-view-card">
+        <canvas id="graphCanvas" height="840"></canvas>
+      </div>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <div>本工具为本地静态网页。联网仅用于调用模型API与加载前端库。</div>
+  </footer>
+
+  <script src="assets/app.js"></script>
+</body>
+</html>
